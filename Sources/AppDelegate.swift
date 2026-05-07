@@ -6,7 +6,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private let store = EKEventStore()
     private var dismissed = Set<String>()
-    private var scheduled = Set<String>()
+    private var scheduled = [String: DispatchWorkItem]()
     private var alertWindow: NSWindow?
     private var statusItem: NSStatusItem?
     private var sound: NSSound?
@@ -91,18 +91,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func startScheduling() {
         scheduleTodaysEvents()
 
-        // Re-scan every 30 minutes to catch newly added events
-        Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in
+        // Rescan every 60 seconds as a safety net for any missed events
+        Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.scheduleTodaysEvents()
         }
 
-        // React immediately when calendar syncs new data
+        // React when calendar syncs — delay 1s to let the store finish updating
         NotificationCenter.default.addObserver(
             forName: .EKEventStoreChanged,
             object: store,
             queue: .main
         ) { [weak self] _ in
-            self?.scheduleTodaysEvents()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                self?.scheduleTodaysEvents()
+            }
         }
     }
 
@@ -116,20 +118,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let id = event.eventIdentifier,
                   let startDate = event.startDate,
                   !event.isAllDay,
-                  !dismissed.contains(id),
-                  !scheduled.contains(id) else { continue }
+                  !dismissed.contains(id) else { continue }
 
-            // Skip events that started more than 60 seconds ago
             let delay = startDate.timeIntervalSinceNow
             guard delay > -60 else { continue }
 
-            scheduled.insert(id)
+            // Cancel any existing timer for this event (handles reschedules)
+            scheduled[id]?.cancel()
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + max(0, delay)) { [weak self] in
+            let work = DispatchWorkItem { [weak self] in
                 guard let self, !self.dismissed.contains(id) else { return }
-                let url = self.extractMeetingURL(from: event)
-                self.showAlert(title: event.title ?? "Meeting", url: url, eventID: id)
+                // Re-fetch so we always use the latest event data
+                let fresh = self.store.event(withIdentifier: id)
+                let title = fresh?.title ?? event.title ?? "Meeting"
+                let url = fresh.flatMap { self.extractMeetingURL(from: $0) }
+                self.showAlert(title: title, url: url, eventID: id)
+                self.scheduled.removeValue(forKey: id)
             }
+
+            scheduled[id] = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(0, delay), execute: work)
         }
     }
 
@@ -201,6 +209,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sound = nil
         dismissed.insert(eventID)
         UserDefaults.standard.set(Array(dismissed), forKey: "dismissed")
+        scheduled.removeValue(forKey: eventID)
         alertWindow?.close()
         alertWindow = nil
     }
