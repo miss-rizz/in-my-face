@@ -5,6 +5,7 @@ import SwiftUI
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private let store = EKEventStore()
+    // Key is "eventID|startDateTimestamp" so a rescheduled meeting is never blocked
     private var dismissed = Set<String>()
     private var scheduled = [String: DispatchWorkItem]()
     private var alertWindow: NSWindow?
@@ -17,6 +18,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         dismissed = Set(UserDefaults.standard.stringArray(forKey: "dismissed") ?? [])
         requestCalendarAccess()
+    }
+
+    // Composite key — dismissed at a specific time, not forever
+    private func dismissedKey(_ id: String, _ date: Date) -> String {
+        "\(id)|\(Int(date.timeIntervalSince1970))"
     }
 
     // MARK: - Status Bar
@@ -118,21 +124,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let id = event.eventIdentifier,
                   let startDate = event.startDate,
                   !event.isAllDay,
-                  !dismissed.contains(id) else { continue }
+                  !dismissed.contains(dismissedKey(id, startDate)) else { continue }
 
             let delay = startDate.timeIntervalSinceNow
             guard delay > -60 else { continue }
 
-            // Cancel any existing timer for this event (handles reschedules)
+            // Cancel existing timer — handles reschedules cleanly
             scheduled[id]?.cancel()
 
             let work = DispatchWorkItem { [weak self] in
-                guard let self, !self.dismissed.contains(id) else { return }
-                // Re-fetch so we always use the latest event data
-                let fresh = self.store.event(withIdentifier: id)
-                let title = fresh?.title ?? event.title ?? "Meeting"
-                let url = fresh.flatMap { self.extractMeetingURL(from: $0) }
-                self.showAlert(title: title, url: url, eventID: id)
+                guard let self,
+                      let fresh = self.store.event(withIdentifier: id),
+                      let freshStart = fresh.startDate,
+                      !self.dismissed.contains(self.dismissedKey(id, freshStart)) else { return }
+
+                let title = fresh.title ?? "Meeting"
+                let url = self.extractMeetingURL(from: fresh)
+                self.showAlert(title: title, url: url, eventID: id, startDate: freshStart)
                 self.scheduled.removeValue(forKey: id)
             }
 
@@ -169,7 +177,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Alert Window
 
-    private func showAlert(title: String, url: URL?, eventID: String) {
+    private func showAlert(title: String, url: URL?, eventID: String, startDate: Date) {
         guard alertWindow == nil else { return }
 
         let screen = NSScreen.main ?? NSScreen.screens[0]
@@ -188,7 +196,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let alertView = AlertView(title: title, url: url) { [weak self] joinURL in
             if let u = joinURL { NSWorkspace.shared.open(u) }
-            self?.dismissAlert(eventID: eventID)
+            self?.dismissAlert(eventID: eventID, startDate: startDate)
         }
         window.contentView = NSHostingView(rootView: alertView)
         window.orderFrontRegardless()
@@ -204,10 +212,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sound?.play()
     }
 
-    private func dismissAlert(eventID: String) {
+    private func dismissAlert(eventID: String, startDate: Date) {
         sound?.stop()
         sound = nil
-        dismissed.insert(eventID)
+        let key = dismissedKey(eventID, startDate)
+        dismissed.insert(key)
         UserDefaults.standard.set(Array(dismissed), forKey: "dismissed")
         scheduled.removeValue(forKey: eventID)
         alertWindow?.close()
