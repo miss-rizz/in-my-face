@@ -1,5 +1,6 @@
 import Cocoa
 import EventKit
+import ServiceManagement
 import SwiftUI
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
@@ -18,6 +19,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         dismissed = Set(UserDefaults.standard.stringArray(forKey: "dismissed") ?? [])
         requestCalendarAccess()
+
+        DispatchQueue.main.async { self.promptLoginItemIfNeeded() }
     }
 
     // Composite key — dismissed at a specific time, not forever
@@ -28,6 +31,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Status Bar
 
     private var nextMeetingItem = NSMenuItem(title: "Loading...", action: #selector(noOp), keyEquivalent: "")
+    private var loginItemMenuItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
 
     private func setupStatusBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -37,6 +41,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
 
         nextMeetingItem.target = self
+        loginItemMenuItem.target = self
 
         let menu = NSMenu()
         menu.delegate = self
@@ -44,12 +49,38 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(nextMeetingItem)
         menu.addItem(.separator())
+        menu.addItem(loginItemMenuItem)
+        menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem?.menu = menu
     }
 
     func menuWillOpen(_ menu: NSMenu) {
         refreshNextMeeting()
+        loginItemMenuItem.state = SMAppService.mainApp.status == .enabled ? .on : .off
+    }
+
+    @objc private func toggleLoginItem() {
+        if SMAppService.mainApp.status == .enabled {
+            try? SMAppService.mainApp.unregister()
+        } else {
+            try? SMAppService.mainApp.register()
+        }
+    }
+
+    private func promptLoginItemIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: "hasAskedLoginItem") else { return }
+        UserDefaults.standard.set(true, forKey: "hasAskedLoginItem")
+
+        let alert = NSAlert()
+        alert.messageText = "Launch at Login?"
+        alert.informativeText = "Would you like In My Face to start automatically when you log in?"
+        alert.addButton(withTitle: "Enable")
+        alert.addButton(withTitle: "Not Now")
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            try? SMAppService.mainApp.register()
+        }
     }
 
     @objc private func noOp() {}
@@ -135,12 +166,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let work = DispatchWorkItem { [weak self] in
                 guard let self,
                       let fresh = self.store.event(withIdentifier: id),
-                      let freshStart = fresh.startDate,
-                      !self.dismissed.contains(self.dismissedKey(id, freshStart)) else { return }
+                      !self.dismissed.contains(self.dismissedKey(id, startDate)) else { return }
 
                 let title = fresh.title ?? "Meeting"
                 let url = self.extractMeetingURL(from: fresh)
-                self.showAlert(title: title, url: url, eventID: id, startDate: freshStart)
+                self.showAlert(title: title, url: url, eventID: id, startDate: startDate)
                 self.scheduled.removeValue(forKey: id)
             }
 
