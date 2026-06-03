@@ -158,7 +158,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                   !dismissed.contains(dismissedKey(id, startDate)) else { continue }
 
             let delay = startDate.timeIntervalSinceNow
-            guard delay > -60 else { continue }
+            guard delay >= 0 else { continue }
 
             // Cancel existing timer — handles reschedules cleanly
             scheduled[id]?.cancel()
@@ -166,7 +166,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let work = DispatchWorkItem { [weak self] in
                 guard let self,
                       let fresh = self.store.event(withIdentifier: id),
-                      !self.dismissed.contains(self.dismissedKey(id, startDate)) else { return }
+                      !self.dismissed.contains(self.dismissedKey(id, startDate)),
+                      startDate.timeIntervalSinceNow > -5 else { return }
 
                 let title = fresh.title ?? "Meeting"
                 let url = self.extractMeetingURL(from: fresh)
@@ -175,7 +176,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
 
             scheduled[id] = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + max(0, delay), execute: work)
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(0, delay - 2), execute: work)
         }
     }
 
